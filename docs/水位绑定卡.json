@@ -1,0 +1,26 @@
+{
+  "card": "水位绑定卡",
+  "version": 1,
+  "date": "2026-11-19",
+  "path": "甲",
+  "path_name": "同库同提交同进同退",
+  "sealed": true,
+  "bind": {
+    "watermark": "watermarks",
+    "arrival": "arrivals",
+    "rule": "推进水位与挂到达同库一次提交，任一步失败则两侧一并撤销"
+  },
+  "rejected": [
+    "只改水位数字样式（不挂到达）",
+    "回滚后残留到达",
+    "当日更换绑定专册",
+    "水位绑定甲径与乙径混用"
+  ],
+  "lock": {
+    "scope": "调度与对账同推同一源水位",
+    "mechanism": "SQLite BEGIN IMMEDIATE 指针锁",
+    "loser": "只记水位绑定争用，不得推进"
+  },
+  "surfaces": ["水位卡片", "到达列表", "源目录", "补采附页", "对账账册"],
+  "invariant": "五处对齐且无空窗"
+}

@@ -59,10 +59,23 @@ createApp({
     const user=ref(localStorage.getItem('lagboard_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const sources=ref([]), arrivals=ref([]), catchups=ref([]);
+    const watermarks=ref([]), events=ref([]), card=ref(null), verify=ref(null);
     const form=ref({source:'订单源', source_clock:'2026-11-16T10:00:00', ingest_clock:'2026-11-16T10:40:00'});
-    const nav=['到达登记','滞后分级','补齐恢复'];
+    const nav=['到达登记','滞后分级','补齐恢复','水位看板'];
     const frozen=computed(()=>sources.value.filter(s=>s.output_mode==='冻结').length);
     const degraded=computed(()=>sources.value.filter(s=>s.output_mode==='降级只读').length);
+    const wmBySource=computed(()=>{const m={};for(const w of watermarks.value)m[w.source]=w;return m;});
+    const contention=computed(()=>events.value.filter(e=>e.kind==='争用').length);
+    const deviations=computed(()=>events.value.filter(e=>e.kind==='偏离'||e.kind==='拒写').length);
+    // 注释：该 Vue 构建的属性绑定遇到 `&&` 会崩，颜色一律用 computed 取值
+    const cardOk=computed(()=>!!(card.value && card.value.ok));
+    const verifyOk=computed(()=>!!(verify.value && verify.value.ok));
+    const cardOkStyle=computed(()=>({color: cardOk.value ? 'var(--ok)' : 'var(--bad)'}));
+    const verifyOkStyle=computed(()=>({color: verifyOk.value ? 'var(--ok)' : 'var(--bad)'}));
+    const cardLabel=computed(()=>cardOk.value ? '已封档 · 甲径（同进同退）' : '偏离');
+    const cardReason=computed(()=>(card.value && !card.value.ok) ? card.value.reason : '');
+    const gapList=computed(()=>((verify.value && !verify.value.ok) ? verify.value.gaps : []));
+    const verifyLabel=computed(()=>verifyOk.value ? '无空窗' : '有空窗');
     function modeClass(m){return m==='冻结'?'bad':(m==='降级只读'?'warn':'ok');}
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
@@ -88,17 +101,29 @@ createApp({
       arrivals.value=Array.isArray(a.items)?a.items:[];
       const c=await loadJson('/api/catchups'); if(c===null) return;
       catchups.value=Array.isArray(c.items)?c.items:[];
+      const w=await loadJson('/api/watermarks'); if(w===null) return;
+      watermarks.value=Array.isArray(w.items)?w.items:[];
+      const e=await loadJson('/api/binding-events'); if(e===null) return;
+      events.value=Array.isArray(e.items)?e.items:[];
+      const k=await loadJson('/api/binding-card'); if(k===null) return;
+      card.value=k;
+      const v=await loadJson('/api/watermarks/verify'); if(v===null) return;
+      verify.value=v;
       if(sources.value.length && !form.value.source) form.value.source=sources.value[0].name;
+    }
+    async function reverify(){
+      const v=await loadJson('/api/watermarks/verify'); if(v===null) return;
+      verify.value=v;
     }
     async function recordArrival(){
       actionErr.value='';
       const r=await fetch('/api/arrivals',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});
-      const j=await r.json(); actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode}`):(j.detail||'失败');
+      const j=await r.json(); actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode} · 水位 seq=${j.watermark_seq} 挂到达#${j.arrival_id}`):(j.detail||'失败');
       await refresh();
     }
     async function doCatchup(name){await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});await refresh();}
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup};
+    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,watermarks,events,card,verify,form,actionErr,frozen,degraded,wmBySource,contention,deviations,cardOkStyle,verifyOkStyle,cardLabel,verifyLabel,cardReason,gapList,reverify,modeClass,login,logout,recordArrival,doCatchup};
   },
   template:`
   <div v-if="!token" class="login">
@@ -126,6 +151,7 @@ createApp({
         <div class="card"><h3>源数量</h3><strong>{{sources.length}}</strong></div>
         <div class="card"><h3>冻结中</h3><strong>{{frozen}}</strong></div>
         <div class="card"><h3>降级只读</h3><strong>{{degraded}}</strong></div>
+        <div class="card"><h3>五处对齐</h3><strong :style="verifyOkStyle">{{verifyLabel}}</strong></div>
       </div>
       <div class="card" v-show="tab===0">
         <h3 style="margin-bottom:8px">登记到达</h3>
@@ -156,6 +182,38 @@ createApp({
         <h3>补齐记录</h3>
         <table><thead><tr><th>源</th><th>状态</th><th>恢复为</th><th>时间</th></tr></thead>
         <tbody><tr v-for="x in catchups" :key="x.id"><td>{{x.source}}</td><td>{{x.status}}</td><td>{{x.restored_mode}}</td><td>{{x.created_at}}</td></tr></tbody></table>
+      </div>
+      <div class="card" v-show="tab===3">
+        <h3>水位绑定看板</h3>
+        <p style="color:#64748b;font-size:13px">
+          绑定卡：
+          <b :style="cardOkStyle">{{cardLabel}}</b>
+          <span v-if="cardReason" style="color:var(--bad)"> · {{cardReason}}</span>
+          · 指针锁：同源同推后交只记争用
+          <button class="ghost" style="margin-left:8px" @click="reverify">重新自检</button>
+        </p>
+        <div class="cards" style="margin-bottom:12px">
+          <div class="card"><h3>水位绑定争用</h3><strong>{{contention}}</strong></div>
+          <div class="card"><h3>拒写 / 偏离</h3><strong>{{deviations}}</strong></div>
+          <div class="card"><h3>五处对齐</h3><strong :style="verifyOkStyle">{{verifyLabel}}</strong></div>
+        </div>
+        <div v-if="gapList.length" class="err" style="margin-bottom:10px">
+          空窗：<span v-for="g in gapList" :key="g">{{g}}；</span>
+        </div>
+        <table><thead><tr><th>源</th><th>水位序号</th><th>源时钟</th><th>挂到达</th><th>到达条数</th></tr></thead>
+        <tbody><tr v-for="s in sources" :key="'w'+s.id">
+          <td>{{s.name}}</td>
+          <td>{{wmBySource[s.name] ? wmBySource[s.name].seq : '—'}}</td>
+          <td>{{wmBySource[s.name] ? wmBySource[s.name].source_clock : '—'}}</td>
+          <td>#{{wmBySource[s.name] ? wmBySource[s.name].arrival_id : '—'}}</td>
+          <td>{{(arrivals||[]).filter(a=>a.source===s.name).length}}</td>
+        </tr></tbody></table>
+        <h3 style="margin:16px 0 6px">对账账册</h3>
+        <table><thead><tr><th>类型</th><th>源</th><th>说明</th><th>到达</th><th>时间</th></tr></thead>
+        <tbody><tr v-for="e in (events||[]).slice(0,10)" :key="'e'+e.id">
+          <td><span class="mode" :class="e.kind==='争用'?'warn':(e.kind==='晋升'?'ok':'bad')">{{e.kind}}</span></td>
+          <td>{{e.source}}</td><td>{{e.detail}}</td><td>{{e.arrival_id || '—'}}</td><td>{{e.created_at}}</td>
+        </tr></tbody></table>
       </div>
     </main>
   </div>`
